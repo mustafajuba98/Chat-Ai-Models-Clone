@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>AI Chat Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <button id="newChatBtn" class="new-chat-btn">
+                <i class="fas fa-plus"></i> New Chat
+            </button>
+            <!-- Model selection dropdown -->
+            <div class="model-selector">
+                <select id="modelSelect" class="model-dropdown">
+                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                    <option value="o1-mini">Claude O1 Mini</option>
+                    <option value="gpt-4-vision">GPT-4 Vision</option>
+                    <option value="dall-e-2">DALL-E 2</option>
+                </select>
+            </div>
+            <div id="chatList" class="chat-list">
+                <!-- Chat history will be populated here -->
+            </div>
+        </div>
+
+        <!-- Main Chat Area -->
+        <div class="main-content">
+            <div id="chatHistory" class="chat-history">
+                <!-- Messages will appear here -->
+                <div class="welcome-message">
+                    <h1>AI Chat Assistant</h1>
+                    <p>Ask me anything, upload an image for analysis, or request to generate an image!</p>
+                </div>
+            </div>
+            <div class="message-controls">
+                <button id="regenerateBtn" class="control-btn" disabled>
+                    <i class="fas fa-redo"></i> Regenerate
+                </button>
+                <button id="editLastBtn" class="control-btn" disabled>
+                    <i class="fas fa-edit"></i> Edit
+                </button>
+            </div>
+            <div class="input-container">
+                <div id="filePreview" class="file-preview"></div>
+                <div class="input-wrapper">
+                    <textarea id="userInput" placeholder="Type your message..." rows="1"></textarea>
+                    <div class="input-buttons">
+                        <button id="uploadBtn" class="feature-btn" title="Upload file or image">
+                            <i class="fas fa-paperclip"></i>
+                        </button>
+                        <button id="sendBtn" onclick="sendMessage()">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+                <input type="file" id="fileInput" style="display: none;" />
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentChatId = null;
+        let currentFile = null;
+        let isProcessing = false;
+
+        // Initialize model selection from localStorage or default
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedModel = localStorage.getItem('selectedModel');
+            if (savedModel) {
+                document.getElementById('modelSelect').value = savedModel;
+            }
+            
+            // Update placeholder based on selected model
+            updatePlaceholder();
+        });
+
+        // Update placeholder text based on selected model
+        function updatePlaceholder() {
+            const model = document.getElementById('modelSelect').value;
+            const inputField = document.getElementById('userInput');
+            
+            if (model === 'dall-e-2') {
+                inputField.placeholder = "Describe the image you'd like to generate...";
+            } else if (model === 'gpt-4-vision') {
+                inputField.placeholder = "Upload an image and ask about it...";
+            } else {
+                inputField.placeholder = "Type your message...";
+            }
+        }
+
+        // Save selected model to localStorage and update placeholder
+        document.getElementById('modelSelect').addEventListener('change', function(e) {
+            localStorage.setItem('selectedModel', e.target.value);
+            updatePlaceholder();
+        });
+
+        async function createNewChat() {
+            try {
+                const response = await fetch('/new_chat', { method: 'POST' });
+                const data = await response.json();
+                currentChatId = data.chat_id;
+                document.getElementById('chatHistory').innerHTML = '';
+                document.getElementById('regenerateBtn').disabled = true;
+                document.getElementById('editLastBtn').disabled = true;
+                await loadChats();
+                return currentChatId;
+            } catch (error) {
+                console.error("Error creating new chat:", error);
+                appendMessage('error', 'Failed to create new chat');
+                return null;
+            }
+        }
+
+        document.getElementById('newChatBtn').addEventListener('click', createNewChat);
+
+        async function loadChats() {
+            try {
+                const response = await fetch('/get_chats');
+                const chats = await response.json();
+                const chatList = document.getElementById('chatList');
+                chatList.innerHTML = '';
+
+                Object.entries(chats).reverse().forEach(([id, chat]) => {
+                    const chatElement = document.createElement('div');
+                    chatElement.className = `chat-item ${id === currentChatId ? 'active' : ''}`;
+                    let title = chat.title;
+                    // Get first user message if available
+                    if (chat.messages && chat.messages.length > 0) {
+                        const firstUserMsg = chat.messages.find(msg => msg.role === 'user');
+                        if (firstUserMsg) {
+                            title = firstUserMsg.content.substring(0, 25) + (firstUserMsg.content.length > 25 ? '...' : '');
+                        }
+                    }
+                    chatElement.innerHTML = `
+                        <i class="fas fa-message"></i>
+                        <span>${title}</span>
+                    `;
+                    chatElement.onclick = () => loadChat(id);
+                    chatList.appendChild(chatElement);
+                });
+            } catch (error) {
+                console.error("Error loading chats:", error);
+                appendMessage('error', 'Failed to load chat history');
+            }
+        }
+
+        async function loadChat(chatId) {
+            try {
+                currentChatId = chatId;
+                const response = await fetch('/get_chats');
+                const chats = await response.json();
+                const chat = chats[chatId];
+
+                const chatHistory = document.getElementById('chatHistory');
+                chatHistory.innerHTML = '';
+
+                if (chat.messages) {
+                    chat.messages.forEach(msg => {
+                        if (msg.role === 'user' && msg.image) {
+                            // Handle user message with image
+                            appendMessage('user', msg.content, msg.image);
+                        } else if (msg.role === 'assistant' && msg.image) {
+                            // Handle assistant message with image (for image generation)
+                            appendMessage('assistant', msg.content, msg.image);
+                        } else {
+                            // Regular text message
+                            appendMessage(msg.role, msg.content);
+                        }
+                    });
+                }
+
+                // Enable or disable control buttons based on chat history
+                const hasMessages = chat.messages && chat.messages.length > 0;
+                document.getElementById('regenerateBtn').disabled = !hasMessages;
+                document.getElementById('editLastBtn').disabled = !hasMessages;
+
+                await loadChats();
+            } catch (error) {
+                console.error("Error loading chat:", error);
+                appendMessage('error', 'Failed to load chat');
+            }
+        }
+
+        async function sendMessage() {
+            if (isProcessing) return; // Prevent multiple submissions
+            
+            const userInput = document.getElementById('userInput');
+            const message = userInput.value.trim();
+            const filePreview = document.getElementById('filePreview');
+            const selectedModel = document.getElementById('modelSelect').value;
+            
+            // Return if no message and no file (except for vision models which might accept just an image)
+            if (!message && !currentFile && selectedModel !== 'gpt-4-vision') return;
+            if (!message && !currentFile && selectedModel === 'gpt-4-vision') {
+                appendMessage('error', 'Please upload an image or type a message');
+                return;
+            }
+
+            isProcessing = true;
+            
+            try {
+                if (!currentChatId) {
+                    currentChatId = await createNewChat();
+                    if (!currentChatId) {
+                        isProcessing = false;
+                        return;
+                    }
+                }
+
+                // Create FormData for file upload
+                const formData = new FormData();
+                formData.append('message', message);
+                formData.append('model', selectedModel);
+                
+                // Handle file if present
+                if (currentFile) {
+                    formData.append('file', currentFile);
+                    // Preview the image if it's an image
+                    if (currentFile.type.startsWith('image/')) {
+                        const imageUrl = URL.createObjectURL(currentFile);
+                        appendMessage('user', message, imageUrl);
+                    } else {
+                        appendMessage('user', `${message}\n[File: ${currentFile.name}]`);
+                    }
+                } else {
+                    appendMessage('user', message);
+                }
+                
+                // Clear input fields
+                userInput.value = '';
+                filePreview.innerHTML = '';
+                currentFile = null;
+                adjustTextarea();
+
+                // Disable send button during processing
+                const sendBtn = document.getElementById('sendBtn');
+                sendBtn.disabled = true;
+                
+                // Send request to backend
+                let response;
+                if (formData.has('file')) {
+                    response = await fetch(`/chat/${currentChatId}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                } else {
+                    response = await fetch(`/chat/${currentChatId}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            message: message,
+                            model: selectedModel 
+                        })
+                    });
+                }
+
+                // Handle response
+                const data = await response.json();
+                if (data.error) {
+                    appendMessage('error', data.error);
+                } else {
+                    // Handle image generation response
+                    if (data.image_url) {
+                        appendMessage('assistant', data.response, data.image_url);
+                    } else {
+                        appendMessage('assistant', data.response);
+                    }
+                    
+                    // Enable control buttons
+                    document.getElementById('regenerateBtn').disabled = false;
+                    document.getElementById('editLastBtn').disabled = false;
+                    await loadChats();
+                }
+            } catch (error) {
+                console.error("Error sending message:", error);
+                appendMessage('error', 'Failed to get response');
+            } finally {
+                isProcessing = false;
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+
+        function appendMessage(role, content, imageUrl = null) {
+            const chatHistory = document.getElementById('chatHistory');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}-message`;
+            
+            let messageContent = '';
+            
+            // Add image if provided
+            if (imageUrl) {
+                messageContent += `<div class="image-container"><img src="${imageUrl}" alt="${role === 'user' ? 'User uploaded image' : 'AI generated image'}" class="uploaded-image"></div>`;
+            }
+            
+            // Add text content
+            messageContent += `<div class="message-content">${content}</div>`;
+            messageDiv.innerHTML = messageContent;
+            
+            chatHistory.appendChild(messageDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+
+        function adjustTextarea() {
+            const textarea = document.getElementById('userInput');
+            textarea.style.height = 'auto';
+            textarea.style.height = (textarea.scrollHeight > 200 ? 200 : textarea.scrollHeight) + 'px';
+        }
+
+        document.getElementById('userInput').addEventListener('input', adjustTextarea);
+        document.getElementById('userInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // File upload handling
+        document.getElementById('uploadBtn').addEventListener('click', function() {
+            document.getElementById('fileInput').click();
+        });
+        
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            currentFile = file;
+            const filePreview = document.getElementById('filePreview');
+            filePreview.innerHTML = '';
+            
+            if (file.type.startsWith('image/')) {
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(file);
+                img.className = 'file-preview-image';
+                filePreview.appendChild(img);
+            } else {
+                const fileIcon = document.createElement('div');
+                fileIcon.className = 'file-icon';
+                fileIcon.innerHTML = `<i class="fas fa-file"></i> ${file.name}`;
+                filePreview.appendChild(fileIcon);
+            }
+            
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'remove-file-btn';
+            removeBtn.innerHTML = '<i class="fas fa-times"></i>';
+            removeBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                filePreview.innerHTML = '';
+                currentFile = null;
+                document.getElementById('fileInput').value = '';
+            });
+            
+            filePreview.appendChild(removeBtn);
+        });
+
+        // Regenerate functionality
+        document.getElementById('regenerateBtn').addEventListener('click', async function() {
+            if (!currentChatId || isProcessing) return;
+            
+            isProcessing = true;
+            try {
+                const response = await fetch(`/regenerate/${currentChatId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        model: document.getElementById('modelSelect').value 
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    appendMessage('error', data.error);
+                } else {
+                    // Remove the last assistant message
+                    const lastAssistantMsg = document.querySelector('.assistant-message:last-child');
+                    if (lastAssistantMsg) {
+                        lastAssistantMsg.remove();
+                    }
+                    
+                    // Handle image generation response
+                    if (data.image_url) {
+                        appendMessage('assistant', data.response, data.image_url);
+                    } else {
+                        appendMessage('assistant', data.response);
+                    }
+                }
+            } catch (error) {
+                console.error("Error regenerating response:", error);
+                appendMessage('error', 'Failed to regenerate response');
+            } finally {
+                isProcessing = false;
+            }
+        });
+        
+        // Edit last message functionality
+        document.getElementById('editLastBtn').addEventListener('click', function() {
+            const lastUserMessage = document.querySelector('.user-message:last-of-type');
+            if (!lastUserMessage) return;
+            
+            const contentElement = lastUserMessage.querySelector('.message-content');
+            if (contentElement) {
+                const content = contentElement.textContent;
+                document.getElementById('userInput').value = content;
+            
+                // Remove the last user and assistant messages
+                const messages = document.querySelectorAll('.message');
+                if (messages.length >= 2) {
+                    messages[messages.length - 1].remove(); // Remove assistant message
+                    messages[messages.length - 2].remove(); // Remove user message
+                }
+            }
+        });
+
+        // Initial load
+        createNewChat();
+    </script>
+</body>
+
+</html>
